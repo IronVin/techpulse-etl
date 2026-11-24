@@ -1,3 +1,11 @@
+"""
+Modulo di Visualizzazione (Presentation Layer) della pipeline TechPulse ETL.
+
+Dashboard interattiva costruita con Streamlit che legge direttamente il dataset
+colonnare Parquet prodotto dal modulo `load.py`, disaccoppiando completamente
+la presentazione dalla fase di ingestion ed evitando query dirette sul DB transazionale.
+"""
+
 from pathlib import Path
 
 import pandas as pd
@@ -5,6 +13,7 @@ import streamlit as st
 
 from techpulse.config import PARQUET_PATH
 
+# Deve essere la prima chiamata Streamlit nello script per configurare layout e metadati
 st.set_page_config(
     page_title="TechPulse ETL | Job Market Dashboard",
     page_icon="📊",
@@ -12,6 +21,8 @@ st.set_page_config(
 )
 
 
+# Caching dei dati con TTL (Time-To-Live) di 1 ora: evita di rileggere il file Parquet
+# dal disco a ogni interazione dell'utente con i filtri (rerun di Streamlit)
 @st.cache_data(ttl=3600)
 def load_jobs_data(parquet_path: Path) -> pd.DataFrame:
     """Carica il dataset Parquet storicizzato."""
@@ -29,6 +40,8 @@ def main() -> None:
 
     df = load_jobs_data(PARQUET_PATH)
 
+    # Graceful degradation: se la pipeline non è ancora stata eseguita, mostro un avviso
+    # chiaro con il comando esatto da lanciare anziché far crashare l'interfaccia
     if df.empty:
         st.warning(
             "Nessun dato trovato in `data/latest_jobs.parquet`. "
@@ -45,12 +58,15 @@ def main() -> None:
         "Cerca nel titolo o azienda", placeholder="es. Data, Backend..."
     )
 
+    # Lavoro su una copia per mantenere intatto il DataFrame originale in cache
+    # e applicare i filtri in cascata in modo reattivo
     filtered_df = df.copy()
     if only_python:
         filtered_df = filtered_df[filtered_df["is_python_role"]]
     if only_remote:
         filtered_df = filtered_df[filtered_df["remote"]]
     if search_query:
+        # Filtro testuale case-insensitive su titolo e azienda con na=False per sicurezza
         mask = filtered_df["title"].str.contains(search_query, case=False, na=False) | (
             filtered_df["company_name"].str.contains(search_query, case=False, na=False)
         )
@@ -60,6 +76,7 @@ def main() -> None:
     col1, col2, col3, col4 = st.columns(4)
     total_jobs = len(filtered_df)
     python_jobs = int(filtered_df["is_python_role"].sum()) if total_jobs else 0
+    # La media su una colonna booleana restituisce direttamente la proporzione (0.0 - 1.0)
     remote_pct = (filtered_df["remote"].mean() * 100) if total_jobs else 0.0
     last_update = df["extracted_at"].max() if "extracted_at" in df.columns else "N/D"
 
@@ -75,6 +92,9 @@ def main() -> None:
 
     with chart_col1:
         st.subheader("🛠️ Top Tecnologie Richieste")
+        # Normalizzo al volo il campo denormalizzato `matched_skills`:
+        # escludo "None", splitto sulla virgola e uso .explode() per trasformare
+        # le liste in singole righe e calcolare le frequenze con value_counts()
         skills_series = (
             filtered_df["matched_skills"]
             .loc[filtered_df["matched_skills"] != "None"]
@@ -113,6 +133,8 @@ def main() -> None:
         "matched_skills",
         "url",
     ]
+    # Uso column_config per formattare i tipi nativi (es. booleani come checkbox
+    # e URL come link cliccabili) senza alterare i dati sottostanti nel DataFrame
     st.dataframe(
         filtered_df[display_cols],
         use_container_width=True,
